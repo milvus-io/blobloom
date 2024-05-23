@@ -37,7 +37,16 @@
 // https://algo2.iti.kit.edu/documents/cacheefficientbloomfilters-jea.pdf.
 package blobloom
 
-import "math"
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"io"
+	"math"
+	"sync/atomic"
+)
 
 // BlockBits is the number of bits per block and the minimum number of bits
 // in a Filter.
@@ -197,6 +206,69 @@ func (f *Filter) Has(h uint64) bool {
 	return true
 }
 
+func (f *Filter) K() uint {
+	// to do: modify f.k's type to uint
+	return uint(f.k)
+}
+
+// TestLocations returns true if all locations are set in the Filter, false otherwise.
+func (f *Filter) TestLocations(locs []uint64) bool {
+	if len(locs) < f.k {
+		// return false positive
+		return true
+	}
+
+	b := getblock(f.b, uint32(locs[0]))
+	for i := 1; i < f.k; i++ {
+		if !b.getbit(uint32(locs[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// Locations returns a list of hash locations representing a data item.
+func Locations(h uint64, k uint) []uint64 {
+	locs := make([]uint64, k)
+
+	h1, h2 := uint32(h>>32), uint32(h)
+	locs[0] = uint64(h2)
+
+	for i := 1; i < int(k); i++ {
+		h1, h2 = doublehash(h1, h2, i)
+		locs[i] = uint64(h1)
+	}
+
+	return locs
+}
+
+type filterInJson struct {
+	K uint    `json:"k"`
+	B []block `json:"b"`
+}
+
+// MarshalJSON marshals a blcok as a JSON structure
+func (b Filter) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&filterInJson{
+		K: uint(b.k),
+		B: b.b,
+	})
+}
+
+// UnmarshalJSON unmarshals a block from JSON created using MarshalJSON
+func (b *Filter) UnmarshalJSON(data []byte) error {
+	filterInJson := &filterInJson{}
+	err := json.Unmarshal(data, filterInJson)
+	if err != nil {
+		return nil
+	}
+
+	b.b = filterInJson.B
+	b.k = int(filterInJson.K)
+
+	return nil
+}
+
 // doublehash generates the hash values to use in iteration i of
 // enhanced double hashing from the values h1, h2 of the previous iteration.
 // See https://www.ccs.neu.edu/home/pete/pub/bloom-filters-verification.pdf.
@@ -276,4 +348,64 @@ func (b *block) getbit(i uint32) bool {
 func (b *block) setbit(i uint32) {
 	bit := uint32(1) << (i % wordSize)
 	(*b)[(i/wordSize)%blockWords] |= bit
+}
+
+func (b *block) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, len(b)*4)
+	for j := range b {
+		x := atomic.LoadUint32(&b[j])
+		binary.LittleEndian.PutUint32(buf[4*j:], x)
+	}
+	k, err := w.Write(buf[:])
+	if err != nil {
+		return 0, nil
+	}
+	return int64(k), err
+}
+
+func (b *block) ReadFrom(r io.Reader) (int64, error) {
+	buf := make([]byte, len(b)*4)
+	k, err := io.ReadFull(r, buf[:])
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return 0, err
+	}
+
+	for i := range b {
+		b[i] |= binary.LittleEndian.Uint32(buf[4*i:])
+	}
+
+	return int64(k), nil
+}
+
+// MarshalJSON marshals a blcok as a JSON structure
+func (b block) MarshalJSON() ([]byte, error) {
+	buffer := bytes.NewBuffer(make([]byte, 0))
+	_, err := b.WriteTo(buffer)
+	if err != nil {
+		return nil, err
+	}
+
+	// URLEncode all bytes
+	return json.Marshal(base64.URLEncoding.EncodeToString(buffer.Bytes()))
+}
+
+// UnmarshalJSON unmarshals a block from JSON created using MarshalJSON
+func (b *block) UnmarshalJSON(data []byte) error {
+	var s string
+	err := json.Unmarshal(data, &s)
+	if err != nil {
+		return err
+	}
+
+	// URLDecode string
+	buf, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return err
+	}
+
+	_, err = b.ReadFrom(bytes.NewReader(buf))
+	return err
 }
