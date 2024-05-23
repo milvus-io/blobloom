@@ -437,7 +437,7 @@ func TestMarshal(t *testing.T) {
 	f2.UnmarshalJSON(data)
 
 	for _, h := range hashes {
-		ret1 := f.Has(h)
+		ret1 := f2.Has(h)
 		assert.True(t, ret1)
 	}
 }
