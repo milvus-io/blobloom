@@ -213,8 +213,9 @@ func (f *Filter) K() uint {
 
 // TestLocations returns true if all locations are set in the Filter, false otherwise.
 func (f *Filter) TestLocations(locs []uint64) bool {
-	if len(locs) < 1 {
-		return false
+	if len(locs) < f.k {
+		// return false positive
+		return true
 	}
 
 	b := getblock(f.b, uint32(locs[0]))
